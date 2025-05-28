@@ -1,4 +1,4 @@
-![alt text](image.png)
+![alt text](architexture/image.png)
 
 # Face-Recognition-Platform
 Core Functionalities
