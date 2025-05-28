@@ -2,7 +2,7 @@ import gradio as gr
 import requests
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import io
 import base64
 import time
@@ -16,6 +16,8 @@ BACKEND_URL = "http://localhost:8000"
 live_recognition_active = False
 recognition_thread = None
 latest_recognition_result = {"name": "No recognition yet", "confidence": 0.0, "timestamp": ""}
+latest_frame_with_bbox = None
+camera_feed_active = False
 
 def make_request(endpoint, method="GET", **kwargs):
     """Make HTTP request to backend"""
@@ -69,6 +71,60 @@ def capture_image_from_camera():
     if ret and frame is not None:
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), None
     return None, "Failed to capture image"
+
+def draw_bounding_box(image, bbox, name, confidence):
+    """Draw bounding box and label on image"""
+    if bbox is None:
+        return image
+    
+    # Convert numpy array to PIL Image if needed
+    if isinstance(image, np.ndarray):
+        pil_image = Image.fromarray(image)
+    else:
+        pil_image = image
+    
+    draw = ImageDraw.Draw(pil_image)
+    
+    # Extract bounding box coordinates
+    x1, y1, x2, y2 = bbox
+    
+    # Choose color based on confidence
+    if confidence > 0.7:
+        box_color = (0, 255, 0)  # Green for high confidence
+        text_color = (0, 255, 0)
+    elif confidence > 0.4:
+        box_color = (255, 165, 0)  # Orange for medium confidence
+        text_color = (255, 165, 0)
+    else:
+        box_color = (255, 0, 0)  # Red for low confidence
+        text_color = (255, 0, 0)
+    
+    # Draw bounding box
+    draw.rectangle([x1, y1, x2, y2], outline=box_color, width=3)
+    
+    # Prepare label text
+    label = f"{name} ({confidence:.2f})"
+    
+    # Try to use a font, fall back to default if not available
+    try:
+        font = ImageFont.truetype("arial.ttf", 16)
+    except:
+        font = ImageFont.load_default()
+    
+    # Get text bounding box
+    text_bbox = draw.textbbox((0, 0), label, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+    
+    # Draw background rectangle for text
+    text_bg_coords = [x1, y1 - text_height - 5, x1 + text_width + 10, y1]
+    draw.rectangle(text_bg_coords, fill=box_color)
+    
+    # Draw text
+    draw.text((x1 + 5, y1 - text_height - 2), label, fill=(255, 255, 255), font=font)
+    
+    # Convert back to numpy array
+    return np.array(pil_image)
 
 def register_face(name, image):
     """Register a new face"""
@@ -146,8 +202,8 @@ def capture_and_recognize():
         return None, f"❌ {error}"
 
 def live_recognition_worker():
-    """Worker function for live recognition"""
-    global latest_recognition_result
+    """Worker function for live recognition with camera feed"""
+    global latest_recognition_result, latest_frame_with_bbox, camera_feed_active
     
     camera = cv2.VideoCapture(0)
     if not camera.isOpened():
@@ -156,12 +212,16 @@ def live_recognition_worker():
     
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    camera_feed_active = True
     
     while live_recognition_active:
         ret, frame = camera.read()
         if not ret:
             continue
-            
+        
+        # Convert BGR to RGB for display
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
         try:
             # Convert frame to bytes for recognition
             _, buffer = cv2.imencode('.jpg', frame)
@@ -171,12 +231,26 @@ def live_recognition_worker():
             result = make_request("recognize", method="POST", files=files)
             
             if result and result.get("success"):
+                name = result.get('name', 'Unknown')
+                confidence = result.get('confidence', 0.0)
+                bbox = result.get('bbox')  # Expecting [x1, y1, x2, y2] format
+                
                 latest_recognition_result = {
-                    "name": result.get('name', 'Unknown'),
-                    "confidence": result.get('confidence', 0.0),
+                    "name": name,
+                    "confidence": confidence,
                     "timestamp": time.strftime('%H:%M:%S'),
                     "status": "✅ Recognized"
                 }
+                
+                # Draw bounding box if available
+                if bbox:
+                    latest_frame_with_bbox = draw_bounding_box(rgb_frame, bbox, name, confidence)
+                else:
+                    # If no bbox from backend, create a simple frame overlay
+                    latest_frame_with_bbox = rgb_frame.copy()
+                    # Add text overlay on the image
+                    cv2.putText(latest_frame_with_bbox, f"{name} ({confidence:.2f})", 
+                               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             else:
                 error_msg = result.get('detail', result.get('error', 'Unknown error'))
                 if "not found" in error_msg.lower():
@@ -186,6 +260,10 @@ def live_recognition_worker():
                         "timestamp": time.strftime('%H:%M:%S'),
                         "status": "❓ Not in database"
                     }
+                    # Show frame without recognition
+                    latest_frame_with_bbox = rgb_frame.copy()
+                    cv2.putText(latest_frame_with_bbox, "Unknown Person", 
+                               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 else:
                     latest_recognition_result = {
                         "name": "Recognition Error",
@@ -193,6 +271,9 @@ def live_recognition_worker():
                         "timestamp": time.strftime('%H:%M:%S'),
                         "status": f"❌ Error: {error_msg}"
                     }
+                    latest_frame_with_bbox = rgb_frame.copy()
+                    cv2.putText(latest_frame_with_bbox, "Error", 
+                               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
         except Exception as e:
             latest_recognition_result = {
                 "name": "Error",
@@ -200,10 +281,15 @@ def live_recognition_worker():
                 "timestamp": time.strftime('%H:%M:%S'),
                 "status": f"❌ {str(e)}"
             }
+            latest_frame_with_bbox = rgb_frame.copy()
+            cv2.putText(latest_frame_with_bbox, f"Error: {str(e)[:20]}", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
         
-        time.sleep(2)  # Recognition every 2 seconds
+        time.sleep(1)  # Recognition every 1 second for smoother experience
     
     camera.release()
+    camera_feed_active = False
+    latest_frame_with_bbox = None
 
 def start_live_recognition():
     """Start live recognition"""
@@ -216,7 +302,7 @@ def start_live_recognition():
     recognition_thread = threading.Thread(target=live_recognition_worker, daemon=True)
     recognition_thread.start()
     
-    return "✅ Live recognition started! Check the results below."
+    return "✅ Live recognition started! Camera feed will appear below."
 
 def stop_live_recognition():
     """Stop live recognition"""
@@ -245,6 +331,19 @@ def get_live_recognition_status():
 **System Status:** {'🟢 Active' if live_recognition_active else '🔴 Stopped'}
 """
     return status_text
+
+def get_camera_feed():
+    """Get current camera frame with bounding boxes"""
+    global latest_frame_with_bbox
+    
+    if not camera_feed_active or latest_frame_with_bbox is None:
+        # Return a placeholder image
+        placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(placeholder, "Camera feed stopped", (200, 240), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        return placeholder
+    
+    return latest_frame_with_bbox
 
 def ask_ai(question):
     """Ask AI about registered faces"""
@@ -366,29 +465,46 @@ def create_interface():
             
             # Live Recognition Tab
             with gr.TabItem("🔍 Live Recognition"):
-                gr.Markdown("## 🎥 Live Face Recognition")
-                gr.Markdown("Continuous face recognition using your camera (updates every 2 seconds)")
+                gr.Markdown("## 🎥 Live Face Recognition with Camera Feed")
+                gr.Markdown("Real-time face recognition with live camera feed and bounding boxes")
                 
                 with gr.Row():
                     start_live_btn = gr.Button("▶️ Start Live Recognition", variant="primary")
                     stop_live_btn = gr.Button("⏹️ Stop Live Recognition", variant="stop")
                 
-                live_status = gr.Textbox(
-                    label="Live Recognition Status",
-                    value="📴 Click 'Start Live Recognition' to begin",
-                    interactive=False,
-                    lines=8
-                )
-                
                 live_result = gr.Textbox(label="Control Messages", interactive=False)
+                
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        # Camera feed with bounding boxes
+                        camera_feed = gr.Image(
+                            label="🎥 Live Camera Feed",
+                            type="numpy",
+                            interactive=False,
+                            show_download_button=False
+                        )
+                    
+                    with gr.Column(scale=1):
+                        live_status = gr.Textbox(
+                            label="Recognition Status",
+                            value="📴 Click 'Start Live Recognition' to begin",
+                            interactive=False,
+                            lines=8
+                        )
                 
                 gr.Markdown("""
                 ### 💡 Instructions:
                 1. Click "▶️ Start Live Recognition" to begin
                 2. Position yourself in front of your camera
-                3. The system will automatically recognize faces every 2 seconds
-                4. Results will appear in the status box above
-                5. Click "⏹️ Stop Live Recognition" when done
+                3. The system will show live camera feed with bounding boxes around detected faces
+                4. Recognition results appear in the status panel on the right
+                5. Green boxes = High confidence, Orange = Medium, Red = Low confidence
+                6. Click "⏹️ Stop Live Recognition" when done
+                
+                ### 🎯 Bounding Box Colors:
+                - **Green**: High confidence (>70%)
+                - **Orange**: Medium confidence (40-70%)
+                - **Red**: Low confidence (<40%)
                 """)
             
             # Single Recognition Tab
@@ -501,9 +617,12 @@ def create_interface():
         def clear_image():
             return None
         
-        # Auto-refresh live recognition status
+        # Auto-refresh live recognition status and camera feed
         def update_live_status():
             return get_live_recognition_status()
+        
+        def update_camera_feed():
+            return get_camera_feed()
         
         # Bind events
         refresh_btn.click(
@@ -537,11 +656,17 @@ def create_interface():
             outputs=[live_result]
         )
         
-        # Auto-update live status every 3 seconds
-        live_status_timer = gr.Timer(3)
+        # Auto-update live recognition components
+        live_status_timer = gr.Timer(2)
         live_status_timer.tick(
             fn=update_live_status,
             outputs=[live_status]
+        )
+        
+        camera_feed_timer = gr.Timer(0.5)  # Update camera feed more frequently
+        camera_feed_timer.tick(
+            fn=update_camera_feed,
+            outputs=[camera_feed]
         )
         
         capture_recognize_btn.click(
