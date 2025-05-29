@@ -38,7 +38,7 @@ Core Functionalities
 | Embedding Storage | Qdrant                                          |
 | Environment       | ⁠ .env ⁠ (for keys, URIs, config)                 |
 -----------------------------------------------------------------------
-
+```bash
  1. Install Dependencies
 
 pip install -r requirements.txt
@@ -66,9 +66,9 @@ sudo systemctl enable mongodb
  Verify MongoDB is running
 mongo --eval "db.adminCommand('listCollections')"
 
-
+```
  4. Install and Setup Qdrant
-bash
+```bash
 # Using Docker (Recommended)
 docker run -p 6333:6333 qdrant/qdrant
 
@@ -78,34 +78,39 @@ cd qdrant
 cargo build --release
 ./target/release/qdrant
 
-
+```
 ### 5. Configure Environment Variables
+``` bash
 Create a .env file in the project root:
 env
 OPENAI_API_KEY=your-openai-api-key-here
 MONGODB_URL=mongodb://localhost:27017/
 QDRANT_URL=localhost
 QDRANT_PORT=6333
-
+```
 
 ## Running the System
 
 ### 1. Start Backend Server
-bash
+
 # Navigate to backend directory
+``` bash
 python fastapi_backend.py
+```
 
 # Or using uvicorn directly
+``` bash
 uvicorn fastapi_backend:app --host 0.0.0.0 --port 8000 --reload
 
 
 The backend will be available at: http://localhost:8000
-
+```
 ### 2. Start Frontend
-bash
-# In a new terminal
-python Ui_frontend.py
 
+# In a new terminal
+``` bash
+python Ui_frontend.py
+```
 
 The frontend will be available at: http://0.0.0.0:7860
 
@@ -115,7 +120,7 @@ The frontend will be available at: http://0.0.0.0:7860
 Once the backend is running, visit: http://localhost:8000/docs for interactive API documentation.
 
 ### Available Endpoints:
-•⁠  ⁠POST /register - Register a new face
+•  ⁠POST /register - Register a new face
 •⁠  ⁠POST /recognize - Recognize a face
 •⁠  ⁠POST /ask - Ask AI questions about registered faces
 •⁠  ⁠GET /faces - List all registered faces
